@@ -72,6 +72,7 @@ python generate_paper_reports.py
   - `research_ideas` (5 items)
 - Each LLM call enforces an input budget under ~4096 tokens (approximation-based guard).
 - Query example: `show me all papers related to token routing`
+- Discover tab supports ArXiv API search + one-click `Download + Index`.
 - Weekly reports write to `./reports/weekly_YYYY-MM-DD.md` with sections for:
   - summary + innovations
   - training details (hyperparameters/losses if available)
@@ -94,6 +95,7 @@ Note: papers indexed before this schema upgrade may miss some fields; re-index t
 - `research_assistant/parser.py` — PDF + equation candidate extraction
 - `research_assistant/highlights.py` — PDF highlight paragraph extraction
 - `research_assistant/reading_companion.py` — highlight retrieval + explanation workflow
+- `research_assistant/arxiv_client.py` — ArXiv discovery + PDF download connector
 - `research_assistant/llm_client.py` — local LLM API wrapper
 - `research_assistant/vector_store.py` — Chroma persistence/query
 - `research_assistant/report.py` — weekly markdown report generator

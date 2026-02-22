@@ -7,6 +7,7 @@ from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components
 
+from research_assistant.arxiv_client import ArxivClient
 from research_assistant.config import get_settings
 from research_assistant.embeddings import Embedder
 from research_assistant.highlights import extract_highlighted_paragraphs
@@ -222,7 +223,7 @@ def apply_styles() -> None:
 
 
 @st.cache_resource
-def build_pipeline() -> tuple[IngestionPipeline, PaperStore, ReadingCompanion, Path, Path]:
+def build_pipeline() -> tuple[IngestionPipeline, PaperStore, ReadingCompanion, ArxivClient, Path, Path]:
     settings = get_settings()
     store = PaperStore(str(settings.chroma_dir))
     embedder = Embedder(settings.embedding_model)
@@ -234,7 +235,8 @@ def build_pipeline() -> tuple[IngestionPipeline, PaperStore, ReadingCompanion, P
         reports_dir=settings.reports_dir,
     )
     companion = ReadingCompanion(store=store, embedder=embedder, llm_client=llm_client)
-    return pipeline, store, companion, settings.reports_dir, settings.watch_dir
+    arxiv_client = ArxivClient()
+    return pipeline, store, companion, arxiv_client, settings.reports_dir, settings.watch_dir
 
 
 def render_pdf_viewer(pdf_path: Path) -> None:
@@ -265,7 +267,7 @@ def render_report_preview(report_file: Path) -> None:
 st.set_page_config(page_title="Local Research Assistant", layout="wide")
 apply_styles()
 
-pipeline, store, companion, reports_dir, watch_dir = build_pipeline()
+pipeline, store, companion, arxiv_client, reports_dir, watch_dir = build_pipeline()
 pdf_files = sorted(watch_dir.glob("*.pdf"))
 weekly_reports = sorted(reports_dir.glob("weekly_*.md"), reverse=True)
 paper_reports = sorted((reports_dir / "papers").glob("*.md"), reverse=True)
@@ -296,8 +298,8 @@ with bar_d:
         report_path = generate_weekly_report(store, reports_dir)
         st.success(f"Weekly report created: {report_path.name}")
 
-tab_ingest, tab_search, tab_reports, tab_companion = st.tabs(
-    ["📥 Ingest", "🔎 Search", "📝 Reports", "🧠 Reading Companion"]
+tab_ingest, tab_search, tab_discover, tab_reports, tab_companion = st.tabs(
+    ["📥 Ingest", "🔎 Search", "🛰️ Discover", "📝 Reports", "🧠 Reading Companion"]
 )
 
 with tab_ingest:
@@ -356,6 +358,82 @@ with tab_search:
                     st.write(f"**Next Steps:** {meta.get('next_steps', '').replace(' || ', '; ')}")
                     st.write(f"**Ideas:** {meta.get('research_ideas', '').replace(' || ', '; ')}")
                     st.caption("Source: Indexed paper")
+
+with tab_discover:
+    st.subheader("Discover from ArXiv")
+    st.markdown(
+        "<p class='section-note'>Search ArXiv and directly ingest papers into your local research memory.</p>",
+        unsafe_allow_html=True,
+    )
+    category_options = [
+        "cs.LG",
+        "cs.AI",
+        "cs.CL",
+        "cs.CV",
+        "cs.RO",
+        "cs.NE",
+        "stat.ML",
+        "math.OC",
+        "all",
+        "custom",
+    ]
+    query_col, cat_col, max_col = st.columns([2.4, 1.2, 1])
+    with query_col:
+        arxiv_query = st.text_input("ArXiv query", value="", placeholder="e.g. token routing mixture of experts")
+    with cat_col:
+        arxiv_category_choice = st.selectbox("Category", options=category_options, index=0)
+        if arxiv_category_choice == "custom":
+            arxiv_category = st.text_input("Custom category", value="cs.LG", placeholder="e.g. cs.DC")
+        elif arxiv_category_choice == "all":
+            arxiv_category = ""
+        else:
+            arxiv_category = arxiv_category_choice
+    with max_col:
+        arxiv_max = st.number_input("Results", min_value=5, max_value=50, value=15, step=5)
+
+    if st.button("Search ArXiv"):
+        try:
+            with st.spinner("Fetching latest papers from ArXiv..."):
+                arxiv_results = arxiv_client.search(
+                    query=arxiv_query,
+                    category=arxiv_category,
+                    max_results=int(arxiv_max),
+                )
+            st.session_state["arxiv_results"] = arxiv_results
+        except Exception as exc:
+            st.error(f"ArXiv search failed: {exc}")
+            st.session_state["arxiv_results"] = []
+
+    arxiv_results = st.session_state.get("arxiv_results", [])
+    if arxiv_results:
+        st.caption(f"Found {len(arxiv_results)} papers.")
+        for idx, paper in enumerate(arxiv_results, start=1):
+            authors = ", ".join(paper.authors[:4]) + (" et al." if len(paper.authors) > 4 else "")
+            st.markdown(
+                f"""
+                <div class="result-card">
+                  <p class="result-title">{idx}. {html.escape(paper.title)}</p>
+                  <span class="chip muted">{html.escape(paper.primary_category or "uncategorized")}</span>
+                  <span class="chip muted">{html.escape(paper.published[:10])}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.write(authors or "Unknown authors")
+            st.write((paper.summary or "No summary available.")[:700])
+            action_a, action_b = st.columns([1, 1])
+            with action_a:
+                if st.button("Download + Index", key=f"arxiv_ingest_{paper.arxiv_id}_{idx}"):
+                    try:
+                        with st.spinner("Downloading PDF and indexing..."):
+                            pdf_path = arxiv_client.download_pdf(paper.pdf_url, watch_dir)
+                            message = pipeline.ingest_pdf(pdf_path)
+                        st.success(f"{message} from ArXiv.")
+                    except Exception as exc:
+                        st.error(f"Failed to ingest paper: {exc}")
+            with action_b:
+                if paper.pdf_url:
+                    st.markdown(f"[Open PDF]({paper.pdf_url})")
 
 with tab_reports:
     left, right = st.columns(2)
