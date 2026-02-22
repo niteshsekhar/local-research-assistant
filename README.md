@@ -1,6 +1,6 @@
 # Local Research Assistant (Python)
 
-A local-first paper assistant that watches a `/papers` folder, ingests new PDFs, extracts text/equation-like lines, summarizes contributions, classifies method type, generates 5 research ideas, stores everything in ChromaDB, supports semantic querying, and creates weekly + per-paper markdown reports.
+A local-first paper assistant that watches a `/papers` folder, ingests new PDFs, extracts text/equation-like lines, summarizes contributions, classifies method type, generates 5 research ideas, stores everything in ChromaDB, supports semantic querying, creates weekly + per-paper markdown reports, and includes a reading companion for highlighted PDF passages.
 
 ## Stack
 - `PyMuPDF` for PDF parsing
@@ -60,11 +60,17 @@ python generate_paper_reports.py
 - Default watch path is `/papers`; if unavailable locally, it falls back to `./papers`.
 - New PDFs are parsed with PyMuPDF.
 - Equation extraction is heuristic (math symbols, LaTeX-ish fragments, assignment-style lines).
+- Paper analysis uses multi-hop LLM querying:
+  - hop 1: global paper understanding
+  - hop 2A: summary/innovations/contributions
+  - hop 2B: architecture/training details
+  - hop 2C: pros/cons/next steps/research ideas
 - LLM output is expected as strict JSON with:
   - `summary`
   - `contributions`
   - `method_type` (`scaling law`, `optimization`, `RL`, `architecture`, `systems`, `data`, `theory`, `other`)
   - `research_ideas` (5 items)
+- Each LLM call enforces an input budget under ~4096 tokens (approximation-based guard).
 - Query example: `show me all papers related to token routing`
 - Weekly reports write to `./reports/weekly_YYYY-MM-DD.md` with sections for:
   - summary + innovations
@@ -74,6 +80,11 @@ python generate_paper_reports.py
   - next steps
   - research ideas
 - Per-paper reports are auto-generated on ingest at `./reports/papers/*.md`
+- Reading companion flow:
+  - Open a paper in your PDF viewer and save highlight annotations
+  - In Streamlit, choose the same PDF and click `Load Highlights From PDF`
+  - Select a highlighted paragraph to retrieve related concepts from indexed papers
+  - Generate an explanation for an `ML researcher`, with optional simplified mode
 
 Note: papers indexed before this schema upgrade may miss some fields; re-index those PDFs to backfill richer report sections.
 
@@ -81,6 +92,8 @@ Note: papers indexed before this schema upgrade may miss some fields; re-index t
 - `run_watcher.py` — folder watcher process
 - `streamlit_app.py` — Streamlit app
 - `research_assistant/parser.py` — PDF + equation candidate extraction
+- `research_assistant/highlights.py` — PDF highlight paragraph extraction
+- `research_assistant/reading_companion.py` — highlight retrieval + explanation workflow
 - `research_assistant/llm_client.py` — local LLM API wrapper
 - `research_assistant/vector_store.py` — Chroma persistence/query
 - `research_assistant/report.py` — weekly markdown report generator

@@ -11,6 +11,8 @@ from .models import PaperInsight, ParsedPaper
 
 
 class LocalLLMClient:
+    INPUT_TOKEN_BUDGET = 3900
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
@@ -79,42 +81,114 @@ class LocalLLMClient:
         return result
 
     def analyze_paper(self, parsed: ParsedPaper) -> PaperInsight:
-        eq_sample = "\n".join(parsed.equation_candidates[:15])
-        text_chunks = self._build_text_chunks(parsed.full_text)
-        parsed_candidates: list[dict[str, Any]] = []
+        eq_sample = "\n".join(parsed.equation_candidates[:20])
+        text_chunks = self._build_text_chunks(parsed.full_text, max_chunk_chars=2200)
+        chunk_context = "\n\n".join(
+            f"[Chunk {index + 1}/{len(text_chunks)}]\n{chunk}"
+            for index, chunk in enumerate(text_chunks[:3])
+        )
 
-        for index, chunk in enumerate(text_chunks, start=1):
-            prompt = f"""
-Analyze this paper excerpt and equation candidates.
-This is chunk {index}/{len(text_chunks)}.
+        stage_one_prompt = f"""
+You are performing step 1 of a multi-hop paper analysis.
+First, build a concise global understanding of the paper.
 
 Return strict JSON with keys:
-- summary (string)
-- innovations (array of 3-6 important innovations)
-- contributions (array of 3-6 bullet-style strings)
+- paper_overview (string, 4-8 sentences)
 - method_type (one of: scaling law, optimization, RL, architecture, systems, data, theory, other)
-- training_info (array of 3-8 items including hyperparameters, objectives, losses, schedule, datasets if present)
-- architecture (string, describe model/system architecture if present, else 'Not specified')
-- pros (array of 2-5 strengths)
-- cons (array of 2-5 limitations)
-- next_steps (array of 3-6 concrete next experiments/extensions)
-- research_ideas (array of exactly 5 concrete research ideas)
+- key_claims (array of 4-8 strings)
+- likely_sections (array of section names inferred from text)
 
-Paper text:
-{chunk}
+Paper context:
+{chunk_context}
 
 Equation candidates:
 {eq_sample}
 """.strip()
 
-            try:
-                raw = self._chat(prompt)
-                parsed_candidates.append(self._safe_json(raw))
-            except Exception:
-                continue
+        stage_one = self._chat_json(stage_one_prompt)
+        overview = str(stage_one.get("paper_overview", "")).strip()
+        method_type = str(stage_one.get("method_type", "other")).strip() or "other"
+        key_claims = stage_one.get("key_claims", []) or []
 
-        parsed_json = self._merge_candidates(parsed_candidates)
-        if not parsed_json:
+        stage_two_summary_prompt = f"""
+You are performing step 2A of a multi-hop paper analysis.
+Use the paper overview and source text to extract summary-level sections.
+
+Return strict JSON with keys:
+- summary (string)
+- innovations (array of 3-6 important innovations)
+- contributions (array of 3-6 concrete contributions)
+
+Paper overview:
+{overview}
+
+Key claims:
+{chr(10).join(f"- {str(item)}" for item in key_claims[:8])}
+
+Paper context:
+{chunk_context}
+""".strip()
+
+        stage_two_summary = self._chat_json(stage_two_summary_prompt)
+
+        stage_two_technical_prompt = f"""
+You are performing step 2B of a multi-hop paper analysis.
+Focus on technical internals.
+
+Return strict JSON with keys:
+- training_info (array of 3-8 items including hyperparameters, losses, optimizer, schedule, data setup if present)
+- architecture (string, describe the architecture/system if present, else 'Not specified')
+
+Paper overview:
+{overview}
+
+Method type:
+{method_type}
+
+Equation candidates:
+{eq_sample}
+
+Paper context:
+{chunk_context}
+""".strip()
+
+        stage_two_technical = self._chat_json(stage_two_technical_prompt)
+
+        stage_two_reasoning_prompt = f"""
+You are performing step 2C of a multi-hop paper analysis.
+Generate critique and forward-looking research direction.
+
+Return strict JSON with keys:
+- pros (array of 2-5 strengths)
+- cons (array of 2-5 limitations)
+- next_steps (array of 3-6 concrete follow-up steps)
+- research_ideas (array of exactly 5 concrete research ideas)
+
+Paper overview:
+{overview}
+
+Method type:
+{method_type}
+
+Paper context:
+{chunk_context}
+""".strip()
+
+        stage_two_reasoning = self._chat_json(stage_two_reasoning_prompt)
+
+        parsed_json = {
+            "summary": stage_two_summary.get("summary", overview),
+            "innovations": stage_two_summary.get("innovations", []),
+            "contributions": stage_two_summary.get("contributions", key_claims[:6]),
+            "method_type": method_type,
+            "training_info": stage_two_technical.get("training_info", []),
+            "architecture": stage_two_technical.get("architecture", "Not specified"),
+            "pros": stage_two_reasoning.get("pros", []),
+            "cons": stage_two_reasoning.get("cons", []),
+            "next_steps": stage_two_reasoning.get("next_steps", []),
+            "research_ideas": stage_two_reasoning.get("research_ideas", []),
+        }
+        if not any(parsed_json.values()):
             parsed_json = self._fallback_analysis(parsed)
 
         contributions = parsed_json.get("contributions") or []
@@ -143,6 +217,63 @@ Equation candidates:
             research_ideas=normalized_ideas[:5],
         )
 
+    def explain_highlight(
+        self,
+        highlight_text: str,
+        related_concepts: list[str],
+        expertise_level: str = "ML researcher",
+        include_simplified: bool = False,
+    ) -> dict[str, Any]:
+        concepts_section = "\n".join(f"- {item}" for item in related_concepts[:8]) or "- None"
+        prompt = f"""
+You are a reading companion for ML papers.
+
+Return strict JSON with keys:
+- expert_explanation (string, concise but deep)
+- simplified_explanation (string; required only if include_simplified=true, otherwise empty string)
+- related_links (array of 3-6 short strings referencing related ideas from context)
+
+Expertise level: {expertise_level}
+include_simplified: {"true" if include_simplified else "false"}
+
+Highlighted paragraph:
+{highlight_text}
+
+Related concept context:
+{concepts_section}
+""".strip()
+
+        try:
+            payload = self._chat_json(prompt)
+            if not payload:
+                raise ValueError("Empty JSON payload")
+        except Exception:
+            payload = {
+                "expert_explanation": (
+                    "Unable to generate model explanation reliably. Use related concept matches below "
+                    "to interpret the highlighted paragraph."
+                ),
+                "simplified_explanation": (
+                    "This highlighted text describes a method or result in the paper."
+                    if include_simplified
+                    else ""
+                ),
+                "related_links": related_concepts[:5],
+            }
+        return {
+            "expert_explanation": str(payload.get("expert_explanation", "")).strip(),
+            "simplified_explanation": str(payload.get("simplified_explanation", "")).strip(),
+            "related_links": [str(x).strip() for x in payload.get("related_links", []) if str(x).strip()][:6],
+        }
+
+    def _chat_json(self, prompt: str) -> dict[str, Any]:
+        bounded_prompt = self._truncate_to_token_budget(prompt, self.INPUT_TOKEN_BUDGET)
+        try:
+            response = self._chat(bounded_prompt)
+            return self._safe_json(response)
+        except Exception:
+            return {}
+
     @staticmethod
     def _build_text_chunks(text: str, max_chunk_chars: int = 2600) -> list[str]:
         clean = text.strip()
@@ -164,6 +295,24 @@ Equation candidates:
                 seen.add(marker)
                 deduped.append(item)
         return deduped
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        return max(1, len(text) // 4)
+
+    @classmethod
+    def _truncate_to_token_budget(cls, text: str, max_tokens: int) -> str:
+        if cls._estimate_tokens(text) <= max_tokens:
+            return text
+        max_chars = max_tokens * 4
+        if max_chars < 200:
+            return text[:max_chars]
+        head = text[: int(max_chars * 0.65)]
+        tail = text[-int(max_chars * 0.30) :]
+        truncated = f"{head}\n\n[... truncated for token budget ...]\n\n{tail}"
+        while cls._estimate_tokens(truncated) > max_tokens and len(truncated) > 120:
+            truncated = truncated[: int(len(truncated) * 0.9)]
+        return truncated
 
     @staticmethod
     def _merge_candidates(candidates: list[dict[str, Any]]) -> dict[str, Any]:
