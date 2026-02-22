@@ -1,0 +1,14 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+*.py[cod]
+
+# Runtime data
+data/chroma/
+papers/
+reports/
+
+# Local caches
+.pytest_cache/
+.mypy_cache/
